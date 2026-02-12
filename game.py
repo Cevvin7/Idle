@@ -8,6 +8,7 @@ import sys
 SCREEN_W, SCREEN_H = 1024, 768
 FPS = 60
 UI_BAR_H = 48  # height of the top UI bar
+BOTTOM_BAR_H = 48  # height of the bottom bar
 
 # Dot grid for wall placement
 GRID_SPACING = 64
@@ -48,6 +49,10 @@ MENU_BG = (25, 25, 35)
 # Shop panel
 SHOP_W = 280
 
+# Upgrade costs
+BASE_UPGRADE_COST = 10
+COST_MULTIPLIER = 10
+
 
 # ---------------------------------------------------------------------------
 # Helper utilities
@@ -59,7 +64,7 @@ def grid_dots(surface_w, surface_h):
     x = GRID_SPACING
     while x < surface_w:
         y = start_y
-        while y < surface_h:
+        while y < surface_h - BOTTOM_BAR_H:
             dots.append((x, y))
             y += GRID_SPACING
         x += GRID_SPACING
@@ -88,7 +93,7 @@ def point_on_grid(p):
         return False
     if snapped[0] < GRID_SPACING or snapped[0] >= SCREEN_W:
         return False
-    if snapped[1] >= SCREEN_H:
+    if snapped[1] >= SCREEN_H - BOTTOM_BAR_H:
         return False
     return dist(p, snapped) < GRID_DOT_RADIUS + 12
 
@@ -108,17 +113,13 @@ def walls_are_adjacent(a, b):
 # ---------------------------------------------------------------------------
 # Enclosed-box detection using flood fill
 # ---------------------------------------------------------------------------
-def would_enclose(walls, new_wall):
-    """Check whether adding new_wall would create a fully enclosed region.
+def find_enclosed_cells(walls):
+    """Find all enclosed cells given the current walls.
 
-    We model the grid cells and check if any cell becomes completely
-    surrounded by walls on all 4 sides. We use flood fill from the
-    edges -- any cell NOT reachable from an edge cell is enclosed.
+    Returns a set of (row, col) tuples for cells that are fully enclosed.
     """
-    all_walls = walls + [new_wall]
     wall_set = set()
-    for w in all_walls:
-        # store walls as frozenset of two endpoints so order doesn't matter
+    for w in walls:
         wall_set.add(frozenset([w[0], w[1]]))
 
     def has_wall(p1, p2):
@@ -127,7 +128,7 @@ def would_enclose(walls, new_wall):
     # Build list of cell top-left corners
     cells = []
     y = UI_BAR_H + GRID_SPACING
-    while y + GRID_SPACING <= SCREEN_H:
+    while y + GRID_SPACING <= SCREEN_H - BOTTOM_BAR_H:
         x = GRID_SPACING
         while x + GRID_SPACING <= SCREEN_W:
             cells.append((x, y))
@@ -135,20 +136,12 @@ def would_enclose(walls, new_wall):
         y += GRID_SPACING
 
     if not cells:
-        return False
+        return set()
 
     cols = (SCREEN_W - GRID_SPACING) // GRID_SPACING
     rows = len(cells) // cols if cols > 0 else 0
     if rows == 0 or cols == 0:
-        return False
-
-    def cell_idx(r, c):
-        return r * cols + c
-
-    def cell_rc(top_left):
-        c = (top_left[0] - GRID_SPACING) // GRID_SPACING
-        r = (top_left[1] - (UI_BAR_H + GRID_SPACING)) // GRID_SPACING
-        return (r, c)
+        return set()
 
     # Flood fill: start from every edge cell
     visited = [[False] * cols for _ in range(rows)]
@@ -156,9 +149,6 @@ def would_enclose(walls, new_wall):
     for r in range(rows):
         for c in range(cols):
             if r == 0 or r == rows - 1 or c == 0 or c == cols - 1:
-                # Check the edge that faces the boundary -- only block if there
-                # is a wall on that boundary side, but for edge cells we always
-                # start them as reachable (they border the open area).
                 queue.append((r, c))
                 visited[r][c] = True
 
@@ -169,7 +159,6 @@ def would_enclose(walls, new_wall):
         bl = (tl[0], tl[1] + GRID_SPACING)
         br = (tl[0] + GRID_SPACING, tl[1] + GRID_SPACING)
 
-        # Try 4 neighbours
         # Up (r-1, c): wall between tl-tr
         if r > 0 and not visited[r - 1][c] and not has_wall(tl, tr):
             visited[r - 1][c] = True
@@ -187,11 +176,53 @@ def would_enclose(walls, new_wall):
             visited[r][c + 1] = True
             queue.append((r, c + 1))
 
+    enclosed = set()
     for r in range(rows):
         for c in range(cols):
             if not visited[r][c]:
-                return True
+                enclosed.add((r, c))
+    return enclosed
+
+
+def would_enclose(walls, new_wall, cannon_pos=None):
+    """Check whether adding new_wall would create a fully enclosed region
+    that contains the cannon (if cannon_pos given). If cannon_pos is None,
+    enclosing is always blocked (legacy behavior).
+    """
+    all_walls = walls + [new_wall]
+    enclosed = find_enclosed_cells(all_walls)
+    if not enclosed:
+        return False
+
+    if cannon_pos is None:
+        return True
+
+    # Check if cannon is in any enclosed cell
+    cannon_cell = get_cell_at_pos(cannon_pos)
+    if cannon_cell is not None and cannon_cell in enclosed:
+        return True
+
+    # Enclosing is allowed as long as cannon is not enclosed
     return False
+
+
+def get_cell_at_pos(pos):
+    """Get the (row, col) cell that contains the given position."""
+    x, y = pos
+    col = (x - GRID_SPACING) // GRID_SPACING
+    row = (y - (UI_BAR_H + GRID_SPACING)) // GRID_SPACING
+    cols = (SCREEN_W - GRID_SPACING) // GRID_SPACING
+    rows_max = (SCREEN_H - BOTTOM_BAR_H - (UI_BAR_H + GRID_SPACING)) // GRID_SPACING
+    if 0 <= row < rows_max and 0 <= col < cols:
+        return (row, col)
+    return None
+
+
+def cell_center(row, col):
+    """Get the pixel center of a grid cell given its (row, col)."""
+    x = GRID_SPACING + col * GRID_SPACING + GRID_SPACING // 2
+    y = UI_BAR_H + GRID_SPACING + row * GRID_SPACING + GRID_SPACING // 2
+    return (x, y)
 
 
 # ---------------------------------------------------------------------------
@@ -324,19 +355,38 @@ class Game:
         self.menu_open = False
         self.shop_scroll = 0
 
-        # Shop items (non-functional for now, 10 items)
+        # Cannon placement mode
+        self.placing_cannon = False
+
+        # Auto-fire state
+        self.autofire_enabled = False
+        self.autofire_timer = 0.0
+        self.autofire_base_delay = 10.0  # 10 seconds base
+
+        # Upgrade levels (how many times each upgrade has been purchased)
+        self.upgrade_levels = {
+            "Auto-Fire": 0,
+        }
+
+        # Shop items
         self.shop_items = [
-            {"name": "Extra Wall", "cost": 10, "desc": "Place an additional wall"},
-            {"name": "Auto-Fire", "cost": 25, "desc": "Fire every 5 seconds"},
-            {"name": "Extra Turret", "cost": 50, "desc": "Add another cannon"},
-            {"name": "Bounce +1", "cost": 30, "desc": "Increase max bounces"},
-            {"name": "Orb Speed+", "cost": 20, "desc": "Faster orbs"},
-            {"name": "Multi-Shot", "cost": 40, "desc": "Fire 3 orbs at once"},
-            {"name": "Score x2", "cost": 100, "desc": "Double score per bounce"},
-            {"name": "Magnet Walls", "cost": 75, "desc": "Walls attract orbs"},
-            {"name": "Piercing Orb", "cost": 60, "desc": "Orbs pass through walls"},
-            {"name": "Big Orbs", "cost": 35, "desc": "Larger collision radius"},
+            {
+                "name": "Auto-Fire",
+                "desc": "Reduce fire delay by 10%",
+                "base_cost": BASE_UPGRADE_COST,
+            },
         ]
+
+    def _get_upgrade_cost(self, item):
+        """Calculate the cost for the next level of an upgrade."""
+        level = self.upgrade_levels.get(item["name"], 0)
+        return item["base_cost"] * (COST_MULTIPLIER ** level)
+
+    def _get_autofire_delay(self):
+        """Get current auto-fire delay based on upgrade level."""
+        level = self.upgrade_levels.get("Auto-Fire", 0)
+        delay = self.autofire_base_delay * (0.9 ** level)
+        return delay
 
     def run(self):
         running = True
@@ -350,7 +400,9 @@ class Game:
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         # Close any open panel, or quit
-                        if self.shop_open:
+                        if self.placing_cannon:
+                            self.placing_cannon = False
+                        elif self.shop_open:
                             self.shop_open = False
                         elif self.menu_open:
                             self.menu_open = False
@@ -363,11 +415,20 @@ class Game:
                         self.shop_scroll -= event.y * 30
                         self.shop_scroll = max(0, self.shop_scroll)
 
-            # Update cannon angle toward mouse
-            mx, my = mouse_pos
-            dx = mx - self.cannon_x
-            dy = my - self.cannon_y
-            self.cannon_angle = math.atan2(dy, dx)
+            # Update cannon angle toward mouse (only when not placing)
+            if not self.placing_cannon:
+                mx, my = mouse_pos
+                dx = mx - self.cannon_x
+                dy = my - self.cannon_y
+                self.cannon_angle = math.atan2(dy, dx)
+
+            # Auto-fire logic
+            if self.autofire_enabled and self.upgrade_levels.get("Auto-Fire", 0) > 0:
+                self.autofire_timer += dt
+                delay = self._get_autofire_delay()
+                if self.autofire_timer >= delay:
+                    self.autofire_timer -= delay
+                    self._fire_cannon()
 
             # Update orbs
             for orb in self.orbs:
@@ -386,13 +447,19 @@ class Game:
     def _handle_click(self, event, pos):
         # Left click
         if event.button == 1:
+            # Check bottom bar clicks first (auto-fire toggle)
+            if self._click_bottom_bar(pos):
+                return
+
             # Check UI clicks first
             if self._click_ui(pos):
                 return
 
-            # If shop or menu is open and click is outside, close it
+            # If shop is open, handle shop clicks or close
             if self.shop_open:
-                if pos[0] < SCREEN_W - SHOP_W:
+                if pos[0] >= SCREEN_W - SHOP_W:
+                    self._click_shop_item(pos)
+                else:
                     self.shop_open = False
                 return
             if self.menu_open:
@@ -400,9 +467,14 @@ class Game:
                     self.menu_open = False
                 return
 
-            # Check if clicking on a grid dot for wall placement (right half of play area
-            # or anywhere really, as long as it's a grid dot)
-            if event.button == 1 and pos[1] > UI_BAR_H:
+            # Cannon placement mode
+            if self.placing_cannon:
+                if pos[1] > UI_BAR_H and pos[1] < SCREEN_H - BOTTOM_BAR_H:
+                    self._try_place_cannon(pos)
+                return
+
+            # Check if clicking on a grid dot for wall placement
+            if event.button == 1 and pos[1] > UI_BAR_H and pos[1] < SCREEN_H - BOTTOM_BAR_H:
                 snapped = snap_to_grid(pos)
                 if dist(pos, snapped) < GRID_DOT_RADIUS + 14:
                     # Valid grid dot click
@@ -414,7 +486,7 @@ class Game:
                         return
 
             # Otherwise, fire cannon
-            if pos[1] > UI_BAR_H:
+            if pos[1] > UI_BAR_H and pos[1] < SCREEN_H - BOTTOM_BAR_H:
                 self._fire_cannon()
 
         # Right click cancels wall placement
@@ -432,10 +504,33 @@ class Game:
             self.shop_open = False
             return True
 
+        # Cannon placement button (next to menu)
+        cannon_btn_rect = pygame.Rect(100, 8, 42, 32)
+        if cannon_btn_rect.collidepoint(pos):
+            self.placing_cannon = not self.placing_cannon
+            self.wall_start = None
+            return True
+
         # Shop button (top-right)
         if pos[0] > SCREEN_W - 100:
             self.shop_open = not self.shop_open
             self.menu_open = False
+            return True
+
+        return False
+
+    def _click_bottom_bar(self, pos):
+        """Handle clicks on the bottom bar. Returns True if consumed."""
+        if pos[1] < SCREEN_H - BOTTOM_BAR_H:
+            return False
+
+        # Auto-fire toggle button
+        autofire_rect = pygame.Rect(SCREEN_W // 2 - 70, SCREEN_H - BOTTOM_BAR_H + 8, 140, 32)
+        if autofire_rect.collidepoint(pos):
+            if self.upgrade_levels.get("Auto-Fire", 0) > 0:
+                self.autofire_enabled = not self.autofire_enabled
+                if self.autofire_enabled:
+                    self.autofire_timer = 0.0
             return True
 
         return False
@@ -459,6 +554,22 @@ class Game:
         spawn_y = self.cannon_y + math.sin(self.cannon_angle) * (CANNON_BARREL_LEN + ORB_RADIUS + 2)
         self.orbs.append(Orb(spawn_x, spawn_y, dx, dy))
 
+    def _try_place_cannon(self, pos):
+        """Place the cannon in the center of the cell the user clicked."""
+        cell = get_cell_at_pos(pos)
+        if cell is None:
+            return
+
+        # Check that this cell is not enclosed
+        enclosed = find_enclosed_cells(self.walls)
+        if cell in enclosed:
+            return
+
+        cx, cy = cell_center(cell[0], cell[1])
+        self.cannon_x = cx
+        self.cannon_y = cy
+        self.placing_cannon = False
+
     def _try_place_wall(self, end_dot):
         start = self.wall_start
         self.wall_start = None
@@ -477,12 +588,34 @@ class Game:
             if (w[0] == start and w[1] == end_dot) or (w[0] == end_dot and w[1] == start):
                 return
 
-        # Check enclosed box
+        # Check enclosed box - allow enclosing as long as cannon isn't inside
         new_wall = (start, end_dot)
-        if would_enclose(self.walls, new_wall):
+        cannon_pos = (self.cannon_x, self.cannon_y)
+        if would_enclose(self.walls, new_wall, cannon_pos):
             return
 
         self.walls.append(new_wall)
+
+    def _click_shop_item(self, pos):
+        """Handle clicking on a shop item to purchase it."""
+        panel_x = SCREEN_W - SHOP_W
+        item_h = 64
+        padding = 8
+        for i, item in enumerate(self.shop_items):
+            item_y = UI_BAR_H + 52 + i * (item_h + padding) - self.shop_scroll
+            item_rect = pygame.Rect(panel_x + padding, item_y, SHOP_W - padding * 2, item_h)
+            if item_rect.collidepoint(pos):
+                self._try_buy_upgrade(item)
+                return
+
+    def _try_buy_upgrade(self, item):
+        """Attempt to purchase an upgrade."""
+        cost = self._get_upgrade_cost(item)
+        if self.score >= cost:
+            self.score -= cost
+            self.upgrade_levels[item["name"]] = self.upgrade_levels.get(item["name"], 0) + 1
+            return True
+        return False
 
     # -- Drawing --------------------------------------------------------------
     def _draw(self, mouse_pos):
@@ -492,9 +625,26 @@ class Game:
         for dot in self.grid_dots:
             color = GRID_COLOR
             # Highlight dot near mouse if placing wall
-            if dist(mouse_pos, dot) < GRID_DOT_RADIUS + 14 and mouse_pos[1] > UI_BAR_H:
+            if (not self.placing_cannon
+                    and dist(mouse_pos, dot) < GRID_DOT_RADIUS + 14
+                    and mouse_pos[1] > UI_BAR_H
+                    and mouse_pos[1] < SCREEN_H - BOTTOM_BAR_H):
                 color = (120, 120, 140)
             pygame.draw.circle(self.screen, color, dot, GRID_DOT_RADIUS)
+
+        # Draw enclosed cells with a subtle fill
+        enclosed = find_enclosed_cells(self.walls)
+        for (r, c) in enclosed:
+            cx, cy = cell_center(r, c)
+            rect = pygame.Rect(
+                cx - GRID_SPACING // 2 + 1,
+                cy - GRID_SPACING // 2 + 1,
+                GRID_SPACING - 2,
+                GRID_SPACING - 2,
+            )
+            fill_surf = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            fill_surf.fill((80, 140, 220, 20))
+            self.screen.blit(fill_surf, rect.topleft)
 
         # Draw walls
         for wall in self.walls:
@@ -504,19 +654,47 @@ class Game:
             pygame.draw.circle(self.screen, (200, 200, 220), wall[1], GRID_DOT_RADIUS + 1)
 
         # Draw wall placement preview
-        if self.wall_start is not None:
+        if self.wall_start is not None and not self.placing_cannon:
             pygame.draw.circle(self.screen, UI_ACCENT, self.wall_start, GRID_DOT_RADIUS + 3)
             snapped_mouse = snap_to_grid(mouse_pos)
             if (snapped_mouse != self.wall_start
                     and walls_are_axis_aligned(self.wall_start, snapped_mouse)
                     and walls_are_adjacent(self.wall_start, snapped_mouse)):
                 preview_color = (100, 200, 100)
-                if would_enclose(self.walls, (self.wall_start, snapped_mouse)):
+                new_wall = (self.wall_start, snapped_mouse)
+                cannon_pos = (self.cannon_x, self.cannon_y)
+                if would_enclose(self.walls, new_wall, cannon_pos):
                     preview_color = (200, 80, 80)
                 pygame.draw.line(
                     self.screen, preview_color,
                     self.wall_start, snapped_mouse, WALL_THICKNESS
                 )
+
+        # Cannon placement preview
+        if self.placing_cannon and mouse_pos[1] > UI_BAR_H and mouse_pos[1] < SCREEN_H - BOTTOM_BAR_H:
+            cell = get_cell_at_pos(mouse_pos)
+            if cell is not None:
+                cx, cy = cell_center(cell[0], cell[1])
+                valid = cell not in enclosed
+                # Draw a ghost cannon at the cell center
+                ghost_color = (100, 200, 100, 80) if valid else (200, 80, 80, 80)
+                ghost_surf = pygame.Surface((CANNON_RADIUS * 2 + 4, CANNON_RADIUS * 2 + 4), pygame.SRCALPHA)
+                pygame.draw.circle(
+                    ghost_surf, ghost_color,
+                    (CANNON_RADIUS + 2, CANNON_RADIUS + 2), CANNON_RADIUS
+                )
+                self.screen.blit(ghost_surf, (cx - CANNON_RADIUS - 2, cy - CANNON_RADIUS - 2))
+                # Highlight the cell
+                rect = pygame.Rect(
+                    cx - GRID_SPACING // 2 + 1,
+                    cy - GRID_SPACING // 2 + 1,
+                    GRID_SPACING - 2,
+                    GRID_SPACING - 2,
+                )
+                highlight_color = (100, 200, 100, 30) if valid else (200, 80, 80, 30)
+                hl_surf = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+                hl_surf.fill(highlight_color)
+                self.screen.blit(hl_surf, rect.topleft)
 
         # Draw orbs
         for orb in self.orbs:
@@ -527,6 +705,9 @@ class Game:
 
         # Draw UI bar
         self._draw_ui(mouse_pos)
+
+        # Draw bottom bar
+        self._draw_bottom_bar(mouse_pos)
 
         # Draw shop panel
         if self.shop_open:
@@ -570,6 +751,28 @@ class Game:
         self.screen.blit(menu_text, (menu_rect.centerx - menu_text.get_width() // 2,
                                       menu_rect.centery - menu_text.get_height() // 2))
 
+        # Cannon placement button (next to menu)
+        cannon_btn_rect = pygame.Rect(100, 8, 42, 32)
+        cannon_hover = cannon_btn_rect.collidepoint(mouse_pos)
+        if self.placing_cannon:
+            btn_bg = UI_ACCENT
+        elif cannon_hover:
+            btn_bg = UI_BUTTON_HOVER
+        else:
+            btn_bg = UI_BUTTON_BG
+        pygame.draw.rect(self.screen, btn_bg, cannon_btn_rect, border_radius=6)
+        border_color = (100, 200, 100) if self.placing_cannon else UI_ACCENT
+        pygame.draw.rect(self.screen, border_color, cannon_btn_rect, 2, border_radius=6)
+
+        # Draw mini cannon icon inside button
+        bcx = cannon_btn_rect.centerx
+        bcy = cannon_btn_rect.centery
+        mini_r = 8
+        pygame.draw.circle(self.screen, CANNON_COLOR, (bcx, bcy), mini_r)
+        pygame.draw.circle(self.screen, CANNON_BARREL_COLOR, (bcx, bcy), mini_r, 2)
+        pygame.draw.line(self.screen, CANNON_BARREL_COLOR, (bcx, bcy), (bcx + 12, bcy), 4)
+        pygame.draw.circle(self.screen, (120, 120, 140), (bcx, bcy), 3)
+
         # Score (top-center)
         score_text = self.font_lg.render(f"Score: {self.score}", True, UI_TEXT)
         self.screen.blit(score_text, (SCREEN_W // 2 - score_text.get_width() // 2, 10))
@@ -584,20 +787,56 @@ class Game:
         self.screen.blit(shop_text, (shop_rect.centerx - shop_text.get_width() // 2,
                                       shop_rect.centery - shop_text.get_height() // 2))
 
+    def _draw_bottom_bar(self, mouse_pos):
+        """Draw the bottom bar with auto-fire toggle."""
+        bar_y = SCREEN_H - BOTTOM_BAR_H
+        pygame.draw.rect(self.screen, UI_BG, (0, bar_y, SCREEN_W, BOTTOM_BAR_H))
+        pygame.draw.line(self.screen, (50, 50, 65), (0, bar_y), (SCREEN_W, bar_y), 2)
+
+        has_autofire = self.upgrade_levels.get("Auto-Fire", 0) > 0
+        autofire_rect = pygame.Rect(SCREEN_W // 2 - 70, bar_y + 8, 140, 32)
+        hover = autofire_rect.collidepoint(mouse_pos)
+
+        if not has_autofire:
+            # Grayed out - not yet purchased
+            bg = (35, 35, 45)
+            text_color = (80, 80, 90)
+        elif self.autofire_enabled:
+            bg = (40, 120, 60)
+            text_color = UI_TEXT
+        elif hover:
+            bg = UI_BUTTON_HOVER
+            text_color = UI_TEXT
+        else:
+            bg = UI_BUTTON_BG
+            text_color = UI_TEXT
+
+        pygame.draw.rect(self.screen, bg, autofire_rect, border_radius=6)
+        border = (40, 120, 60) if self.autofire_enabled else (70, 70, 90) if not has_autofire else UI_ACCENT
+        pygame.draw.rect(self.screen, border, autofire_rect, 2, border_radius=6)
+
+        label = "AUTO-FIRE"
+        if has_autofire and self.autofire_enabled:
+            delay = self._get_autofire_delay()
+            label = f"AUTO: {delay:.1f}s"
+        af_text = self.font_sm.render(label, True, text_color)
+        self.screen.blit(af_text, (autofire_rect.centerx - af_text.get_width() // 2,
+                                    autofire_rect.centery - af_text.get_height() // 2))
+
     def _draw_shop(self, mouse_pos):
         panel_x = SCREEN_W - SHOP_W
-        panel_rect = pygame.Rect(panel_x, UI_BAR_H, SHOP_W, SCREEN_H - UI_BAR_H)
+        panel_rect = pygame.Rect(panel_x, UI_BAR_H, SHOP_W, SCREEN_H - UI_BAR_H - BOTTOM_BAR_H)
 
         # Background
         pygame.draw.rect(self.screen, SHOP_BG, panel_rect)
-        pygame.draw.line(self.screen, (50, 50, 65), (panel_x, UI_BAR_H), (panel_x, SCREEN_H), 2)
+        pygame.draw.line(self.screen, (50, 50, 65), (panel_x, UI_BAR_H), (panel_x, SCREEN_H - BOTTOM_BAR_H), 2)
 
         # Title
         title = self.font.render("UPGRADES", True, UI_TEXT)
         self.screen.blit(title, (panel_x + SHOP_W // 2 - title.get_width() // 2, UI_BAR_H + 12))
 
         # Scrollable item list
-        clip_rect = pygame.Rect(panel_x, UI_BAR_H + 44, SHOP_W, SCREEN_H - UI_BAR_H - 44)
+        clip_rect = pygame.Rect(panel_x, UI_BAR_H + 44, SHOP_W, SCREEN_H - UI_BAR_H - BOTTOM_BAR_H - 44)
         self.screen.set_clip(clip_rect)
 
         item_h = 64
@@ -617,8 +856,12 @@ class Game:
             pygame.draw.rect(self.screen, bg, item_rect, border_radius=8)
             pygame.draw.rect(self.screen, (70, 70, 90), item_rect, 1, border_radius=8)
 
-            # Item name
-            name_text = self.font_sm.render(item["name"], True, UI_TEXT)
+            # Item name + level
+            level = self.upgrade_levels.get(item["name"], 0)
+            name_str = f"{item['name']}"
+            if level > 0:
+                name_str += f" (Lv {level})"
+            name_text = self.font_sm.render(name_str, True, UI_TEXT)
             self.screen.blit(name_text, (item_rect.x + 12, item_rect.y + 8))
 
             # Item description
@@ -626,8 +869,11 @@ class Game:
             self.screen.blit(desc_text, (item_rect.x + 12, item_rect.y + 28))
 
             # Cost
-            cost_text = self.font_sm.render(f"{item['cost']} pts", True, UI_ACCENT)
-            self.screen.blit(cost_text, (item_rect.right - 70, item_rect.y + 8))
+            cost = self._get_upgrade_cost(item)
+            can_afford = self.score >= cost
+            cost_color = UI_ACCENT if can_afford else (120, 60, 60)
+            cost_text = self.font_sm.render(f"{cost} pts", True, cost_color)
+            self.screen.blit(cost_text, (item_rect.right - cost_text.get_width() - 12, item_rect.y + 8))
 
         self.screen.set_clip(None)
 
