@@ -28,6 +28,20 @@ ORB_SPEED = 7
 ORB_COLOR = (100, 200, 255)
 ORB_BASE_MAX_BOUNCES = 3
 
+# Ball color progression (upgrade levels 0-8)
+BALL_COLORS = [
+    (255, 255, 255),   # 0: White (default)
+    (255, 50, 50),     # 1: Red
+    (255, 165, 0),     # 2: Orange
+    (255, 255, 0),     # 3: Yellow
+    (0, 200, 0),       # 4: Green
+    (50, 100, 255),    # 5: Blue
+    (75, 0, 130),      # 6: Indigo
+    (148, 0, 211),     # 7: Violet
+]
+BALL_COLOR_NAMES = ["White", "Red", "Orange", "Yellow", "Green", "Blue", "Indigo", "Violet", "Rainbow"]
+MAX_BALL_COLOR_LEVEL = 8  # 0-7 are solid colors, 8 is rainbow
+
 # Walls
 WALL_COLOR = (220, 220, 220)
 WALL_THICKNESS = 6
@@ -247,7 +261,8 @@ def cell_center(row, col):
 # Orb class
 # ---------------------------------------------------------------------------
 class Orb:
-    def __init__(self, x, y, dx, dy, max_bounces=ORB_BASE_MAX_BOUNCES):
+    def __init__(self, x, y, dx, dy, max_bounces=ORB_BASE_MAX_BOUNCES,
+                 color=(255, 255, 255), rainbow=False):
         self.x = x
         self.y = y
         self.dx = dx
@@ -255,6 +270,8 @@ class Orb:
         self.bounces = 0
         self.max_bounces = max_bounces
         self.alive = True
+        self.base_color = color
+        self.rainbow = rainbow
 
     def update(self, walls):
         """Move the orb and check for wall collisions. Returns points earned."""
@@ -318,13 +335,40 @@ class Orb:
                 return 1
         return 0
 
+    def _get_current_color(self):
+        """Get the current display color, handling rainbow cycling."""
+        if self.rainbow:
+            # Cycle through all colors based on time
+            t = pygame.time.get_ticks() / 500.0  # cycle speed
+            hue = (t % 1.0)
+            # HSV to RGB (simplified, S=1, V=1)
+            i = int(hue * 6)
+            f = hue * 6 - i
+            q = int(255 * (1 - f))
+            t_val = int(255 * f)
+            i = i % 6
+            if i == 0:
+                return (255, t_val, 0)
+            elif i == 1:
+                return (q, 255, 0)
+            elif i == 2:
+                return (0, 255, t_val)
+            elif i == 3:
+                return (0, q, 255)
+            elif i == 4:
+                return (t_val, 0, 255)
+            else:
+                return (255, 0, q)
+        return self.base_color
+
     def draw(self, surface):
+        base = self._get_current_color()
         # Fade orb color as bounces increase
         fade = max(0, 1 - self.bounces / (self.max_bounces + 1))
         color = (
-            int(ORB_COLOR[0] * fade),
-            int(ORB_COLOR[1] * fade),
-            int(ORB_COLOR[2] * fade + 80 * (1 - fade)),
+            int(base[0] * fade + 40 * (1 - fade)),
+            int(base[1] * fade + 40 * (1 - fade)),
+            int(base[2] * fade + 40 * (1 - fade)),
         )
         pygame.draw.circle(surface, color, (int(self.x), int(self.y)), ORB_RADIUS)
         # glow
@@ -393,6 +437,8 @@ class Game:
             "Fire Delay": 0,       # repeatable, requires Auto-Fire
             "Extra Walls": 0,      # repeatable, +2 walls each
             "Extra Bounces": 0,    # repeatable, +2 bounces each
+            "Ball Color": 0,       # repeatable (max 8), changes color + base value
+            "Bounce Multiplier": 0,  # repeatable, +0.25x multiplier each
         }
 
         # Shop items
@@ -428,6 +474,19 @@ class Game:
                 "base_cost": BASE_UPGRADE_COST,
                 "type": "repeatable",
             },
+            {
+                "name": "Ball Color",
+                "desc": "Upgrade ball color (+1 base value)",
+                "base_cost": BASE_UPGRADE_COST,
+                "type": "repeatable",
+                "max_level": MAX_BALL_COLOR_LEVEL,
+            },
+            {
+                "name": "Bounce Multiplier",
+                "desc": "Bounce value x0.25 multiplier",
+                "base_cost": BASE_UPGRADE_COST,
+                "type": "repeatable",
+            },
         ]
 
     def _get_max_walls(self):
@@ -450,6 +509,25 @@ class Game:
         level = self.upgrade_levels.get("Fire Delay", 0)
         delay = self.autofire_base_delay * (0.9 ** level)
         return delay
+
+    def _get_ball_color(self):
+        """Get the current ball color tuple and whether it's rainbow."""
+        level = self.upgrade_levels.get("Ball Color", 0)
+        if level >= MAX_BALL_COLOR_LEVEL:
+            return (255, 255, 255), True  # rainbow mode
+        return BALL_COLORS[level], False
+
+    def _get_bounce_base_value(self):
+        """Get base points per bounce (1 + ball color level)."""
+        return 1 + self.upgrade_levels.get("Ball Color", 0)
+
+    def _get_bounce_multiplier(self):
+        """Get the bounce value multiplier."""
+        return 1.0 + self.upgrade_levels.get("Bounce Multiplier", 0) * 0.25
+
+    def _get_points_per_bounce(self):
+        """Get total points earned per bounce."""
+        return self._get_bounce_base_value() * self._get_bounce_multiplier()
 
     def run(self):
         running = True
@@ -505,9 +583,10 @@ class Game:
                     self._fire_cannon()
 
             # Update orbs
+            ppb = self._get_points_per_bounce()
             for orb in self.orbs:
-                pts = orb.update(self.walls)
-                self.score += pts
+                bounces = orb.update(self.walls)
+                self.score += bounces * ppb
             self.orbs = [o for o in self.orbs if o.alive]
 
             # Draw
@@ -653,7 +732,9 @@ class Game:
         spawn_x = self.cannon_x + math.cos(self.cannon_angle) * (CANNON_BARREL_LEN + ORB_RADIUS + 2)
         spawn_y = self.cannon_y + math.sin(self.cannon_angle) * (CANNON_BARREL_LEN + ORB_RADIUS + 2)
         max_bounces = self._get_max_bounces()
-        self.orbs.append(Orb(spawn_x, spawn_y, dx, dy, max_bounces))
+        color, rainbow = self._get_ball_color()
+        self.orbs.append(Orb(spawn_x, spawn_y, dx, dy, max_bounces,
+                             color=color, rainbow=rainbow))
 
     def _try_place_cannon(self, pos):
         """Place the cannon in the center of the cell the user clicked."""
@@ -718,7 +799,7 @@ class Game:
     def _click_shop_item(self, pos):
         """Handle clicking on a shop item to purchase it."""
         panel_x = SCREEN_W - SHOP_W
-        item_h = 64
+        item_h = 72
         padding = 8
         for i, item in enumerate(self.shop_items):
             item_y = UI_BAR_H + 52 + i * (item_h + padding) - self.shop_scroll
@@ -733,6 +814,11 @@ class Game:
 
         # One-time: can't buy again
         if item.get("type") == "one_time" and level > 0:
+            return False
+
+        # Check max level cap
+        max_level = item.get("max_level")
+        if max_level is not None and level >= max_level:
             return False
 
         # Check requirements
@@ -907,8 +993,13 @@ class Game:
         pygame.draw.circle(self.screen, (120, 120, 140), (bcx, bcy), 3)
 
         # Score (top-center)
-        score_text = self.font_lg.render(f"Score: {self.score}", True, UI_TEXT)
-        self.screen.blit(score_text, (SCREEN_W // 2 - score_text.get_width() // 2, 10))
+        score_text = self.font_lg.render(f"Score: {int(self.score)}", True, UI_TEXT)
+        self.screen.blit(score_text, (SCREEN_W // 2 - score_text.get_width() // 2, 4))
+        # Points per bounce info
+        ppb = self._get_points_per_bounce()
+        ppb_str = f"{ppb:.2f}" if ppb != int(ppb) else f"{int(ppb)}"
+        ppb_text = self.font_sm.render(f"per bounce: {ppb_str}", True, (150, 150, 170))
+        self.screen.blit(ppb_text, (SCREEN_W // 2 - ppb_text.get_width() // 2, 28))
 
         # Shop button (top-right)
         shop_rect = pygame.Rect(SCREEN_W - 92, 8, 84, 32)
@@ -1033,7 +1124,7 @@ class Game:
         clip_rect = pygame.Rect(panel_x, UI_BAR_H + 44, SHOP_W, SCREEN_H - UI_BAR_H - BOTTOM_BAR_H - 44)
         self.screen.set_clip(clip_rect)
 
-        item_h = 64
+        item_h = 72
         padding = 8
         max_scroll = max(0, len(self.shop_items) * (item_h + padding) - clip_rect.height + padding)
         self.shop_scroll = min(self.shop_scroll, max_scroll)
@@ -1048,13 +1139,15 @@ class Game:
             level = self.upgrade_levels.get(item["name"], 0)
             is_one_time = item.get("type") == "one_time"
             is_purchased = is_one_time and level > 0
+            max_level = item.get("max_level")
+            is_maxed = max_level is not None and level >= max_level
             req = item.get("requires")
             req_met = req is None or self.upgrade_levels.get(req, 0) > 0
 
             hover = (item_rect.collidepoint(mouse_pos) and self.shop_open
-                     and not is_purchased and req_met)
+                     and not is_purchased and not is_maxed and req_met)
 
-            if is_purchased:
+            if is_purchased or is_maxed:
                 bg = (30, 50, 35)
             elif not req_met:
                 bg = (35, 30, 30)
@@ -1064,14 +1157,22 @@ class Game:
                 bg = SHOP_ITEM_BG
 
             pygame.draw.rect(self.screen, bg, item_rect, border_radius=8)
-            border_color = (60, 100, 60) if is_purchased else (90, 50, 50) if not req_met else (70, 70, 90)
+            border_color = ((60, 100, 60) if (is_purchased or is_maxed)
+                            else (90, 50, 50) if not req_met else (70, 70, 90))
             pygame.draw.rect(self.screen, border_color, item_rect, 1, border_radius=8)
 
             # Item name + level
             name_str = f"{item['name']}"
             if not is_one_time and level > 0:
-                name_str += f" (Lv {level})"
-            name_color = (100, 180, 100) if is_purchased else (150, 100, 100) if not req_met else UI_TEXT
+                if item["name"] == "Ball Color":
+                    name_str += f" ({BALL_COLOR_NAMES[level]})"
+                elif item["name"] == "Bounce Multiplier":
+                    mult = 1.0 + level * 0.25
+                    name_str += f" (x{mult:.2f})"
+                else:
+                    name_str += f" (Lv {level})"
+            name_color = ((100, 180, 100) if (is_purchased or is_maxed)
+                          else (150, 100, 100) if not req_met else UI_TEXT)
             name_text = self.font_sm.render(name_str, True, name_color)
             self.screen.blit(name_text, (item_rect.x + 12, item_rect.y + 8))
 
@@ -1079,15 +1180,57 @@ class Game:
             if not req_met:
                 desc_str = f"Requires: {req}"
                 desc_color = (150, 80, 80)
+            elif item["name"] == "Ball Color" and not is_maxed:
+                next_name = BALL_COLOR_NAMES[level + 1] if level < MAX_BALL_COLOR_LEVEL else "MAX"
+                desc_str = f"Next: {next_name} (base +1)"
+                desc_color = (150, 150, 170)
+            elif item["name"] == "Bounce Multiplier":
+                next_mult = 1.0 + (level + 1) * 0.25
+                desc_str = f"Next: x{next_mult:.2f} multiplier"
+                desc_color = (150, 150, 170)
             else:
                 desc_str = item["desc"]
                 desc_color = (150, 150, 170)
             desc_text = self.font_sm.render(desc_str, True, desc_color)
             self.screen.blit(desc_text, (item_rect.x + 12, item_rect.y + 28))
 
+            # Draw color swatch for Ball Color upgrade
+            if item["name"] == "Ball Color" and level > 0:
+                swatch_x = item_rect.x + 12
+                swatch_y = item_rect.y + 46
+                if level >= MAX_BALL_COLOR_LEVEL:
+                    # Draw rainbow swatch
+                    for sx in range(40):
+                        hue = sx / 40.0
+                        ci = int(hue * 6)
+                        f = hue * 6 - ci
+                        ci = ci % 6
+                        if ci == 0:
+                            sc = (255, int(255 * f), 0)
+                        elif ci == 1:
+                            sc = (int(255 * (1 - f)), 255, 0)
+                        elif ci == 2:
+                            sc = (0, 255, int(255 * f))
+                        elif ci == 3:
+                            sc = (0, int(255 * (1 - f)), 255)
+                        elif ci == 4:
+                            sc = (int(255 * f), 0, 255)
+                        else:
+                            sc = (255, 0, int(255 * (1 - f)))
+                        pygame.draw.line(self.screen, sc,
+                                         (swatch_x + sx, swatch_y),
+                                         (swatch_x + sx, swatch_y + 8))
+                else:
+                    pygame.draw.rect(self.screen, BALL_COLORS[level],
+                                     (swatch_x, swatch_y, 40, 8), border_radius=2)
+
             # Cost / status label
             if is_purchased:
                 status_text = self.font_sm.render("PURCHASED", True, (100, 180, 100))
+                self.screen.blit(status_text, (item_rect.right - status_text.get_width() - 12,
+                                                item_rect.y + 8))
+            elif is_maxed:
+                status_text = self.font_sm.render("MAXED", True, (100, 180, 100))
                 self.screen.blit(status_text, (item_rect.right - status_text.get_width() - 12,
                                                 item_rect.y + 8))
             elif not req_met:
@@ -1098,7 +1241,7 @@ class Game:
                 cost = self._get_upgrade_cost(item)
                 can_afford = self.score >= cost
                 cost_color = UI_ACCENT if can_afford else (120, 60, 60)
-                cost_text = self.font_sm.render(f"{cost} pts", True, cost_color)
+                cost_text = self.font_sm.render(f"{int(cost)} pts", True, cost_color)
                 self.screen.blit(cost_text, (item_rect.right - cost_text.get_width() - 12,
                                               item_rect.y + 8))
 
